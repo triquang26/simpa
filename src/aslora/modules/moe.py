@@ -45,11 +45,11 @@ class MixLoraSparseMoe(nn.Module):
             return lora_module.lora_forward(base_out, x_sparse)
         if self.branch_mode == 'dense_only':
             return lora_module.lora_forward(base_out, x_dense)
-        # dual_scalar_gate — gate always uses original hidden state (hidden_size-dim), not intermediate acts
-        delta_dense = lora_module.lora_forward(base_out, x_dense) - base_out
-        delta_sparse = lora_module.lora_forward(base_out, x_sparse) - base_out
-        g = self.scalar_gate(gate_input if gate_input is not None else x_dense).to(base_out.dtype)
-        return base_out + g * delta_dense + (1.0 - g) * delta_sparse
+        # dual_scalar_gate — exploit LoRA linearity + scalar gate to fuse into a single forward:
+        # g·B(A(x_d)) + (1-g)·B(A(x_s)) = B(A(g·x_d + (1-g)·x_s))  when g is scalar per token
+        g = self.scalar_gate(gate_input if gate_input is not None else x_dense).to(x_dense.dtype)
+        x_mixed = g * x_dense + (1.0 - g) * x_sparse
+        return lora_module.lora_forward(base_out, x_mixed)
 
     # OPTIMIZATION: Accept pre-computed base projections to prevent re-calculation
     def _apply_expert(self, x_dense: torch.Tensor, x_sparse: torch.Tensor, expert_dict: nn.ModuleDict, g_base=None, u_base=None) -> torch.Tensor:
