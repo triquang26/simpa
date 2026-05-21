@@ -1,0 +1,18 @@
+# secrets / env
+.env
+
+# checkpoints & training artifacts
+checkpoint_*
+*_output
+outputs/
+runs/
+wandb/
+data_cache/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# misc
+.nbref/

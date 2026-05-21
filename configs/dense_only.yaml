@@ -1,0 +1,46 @@
+model:
+  name: meta-llama/Llama-2-7b-hf
+  dtype: bfloat16
+  attn_implementation: sdpa
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+moe:
+  num_experts: 8
+  top_k: 2
+  router_aux_loss_coef: 0.001
+  gate_rank: 16
+sparsity:
+  target_sparsity: 0.0
+branch_mode: dense_only
+data:
+  dataset: meta-math/MetaMathQA
+  max_length: 1024
+  num_samples: 100000
+  cache_dir: data_cache
+train:
+  per_device_train_batch_size: 32
+  gradient_accumulation_steps: 2
+  num_train_epochs: 1
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+  optim: adamw_torch_fused
+  lr_scheduler_type: cosine
+  bf16: true
+  tf32: true
+  logging_steps: 50
+  gradient_checkpointing: true
+  dataloader_num_workers: 8
+eval:
+  gsm8k_batch_size: 32
+  max_new_tokens: 512
+hub:
+  username: twanghcmut
+  repo_template: "{model_short}-aslora-{branch_mode}"
+  push_after_train: true
+wandb:
+  project: aslora-emnlp
+  run_name_template: "{model_short}-{branch_mode}"
