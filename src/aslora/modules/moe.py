@@ -40,18 +40,13 @@ class MixLoraSparseMoe(nn.Module):
         self.last_hidden: torch.Tensor | None = None
         self.last_routing: torch.Tensor | None = None
 
-    def _apply_lora_with_branch(self, lora_module, base_out: torch.Tensor, x_dense: torch.Tensor, x_sparse: torch.Tensor, gate_input: torch.Tensor | None = None) -> torch.Tensor:
-        if self.branch_mode == 'sparse_only':
-            return lora_module.lora_forward(base_out, x_sparse)
+    def _apply_lora_with_branch(self, lora_module, base_out: torch.Tensor, x_dense: torch.Tensor, x_sparse: torch.Tensor) -> torch.Tensor:
+        # LoRA input: dense for 'dense_only' mode, sparse otherwise. The dual_scalar_gate
+        # branching is handled at the y1/y2 level in forward(), not per-projection.
         if self.branch_mode == 'dense_only':
             return lora_module.lora_forward(base_out, x_dense)
-        # dual_scalar_gate — exploit LoRA linearity + scalar gate to fuse into a single forward:
-        # g·B(A(x_d)) + (1-g)·B(A(x_s)) = B(A(g·x_d + (1-g)·x_s))  when g is scalar per token
-        g = self.scalar_gate(gate_input if gate_input is not None else x_dense).to(x_dense.dtype)
-        x_mixed = g * x_dense + (1.0 - g) * x_sparse
-        return lora_module.lora_forward(base_out, x_mixed)
+        return lora_module.lora_forward(base_out, x_sparse)
 
-    # OPTIMIZATION: Accept pre-computed base projections to prevent re-calculation
     def _apply_expert(self, x_dense: torch.Tensor, x_sparse: torch.Tensor, expert_dict: nn.ModuleDict, g_base=None, u_base=None) -> torch.Tensor:
         if g_base is None:
             g_base = self.base_layer_.gate_proj(x_dense)
@@ -62,15 +57,13 @@ class MixLoraSparseMoe(nn.Module):
         u = self._apply_lora_with_branch(expert_dict["up_proj"], u_base, x_dense, x_sparse) if "up_proj" in expert_dict else u_base
         act = self.act_fn_(g) * u
         d_base = self.base_layer_.down_proj(act)
-        # down_proj LoRA input is `act` (intermediate, 11008-dim); gate must use original hidden state (4096-dim)
-        d = self._apply_lora_with_branch(expert_dict["down_proj"], d_base, act, act, gate_input=x_dense) if "down_proj" in expert_dict else d_base
+        d = self._apply_lora_with_branch(expert_dict["down_proj"], d_base, act, act) if "down_proj" in expert_dict else d_base
         return d
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_shape = hidden_states.shape
         x_flat = hidden_states.view(-1, self.hidden_size)
 
-        # OPTIMIZATION: Compute heavy base matrices ONCE for all tokens
         g_base_full = self.base_layer_.gate_proj(x_flat)
         u_base_full = self.base_layer_.up_proj(x_flat)
 
@@ -79,8 +72,11 @@ class MixLoraSparseMoe(nn.Module):
         else:
             x_sparse = self.sparsify_module(x_flat)
 
-        # Shared expert (Index 0)
-        y1 = self._apply_expert(x_flat, x_sparse, self.experts_[0], g_base_full, u_base_full)
+        # Shared expert (Index 0):
+        # - dual_scalar_gate: shared expert acts as the dense path (LoRA on x_flat)
+        # - sparse_only / dense_only: shared expert uses the same LoRA input as routed experts
+        shared_lora_input = x_flat if self.branch_mode == 'dual_scalar_gate' else x_sparse
+        y1 = self._apply_expert(x_flat, shared_lora_input, self.experts_[0], g_base_full, u_base_full)
 
         x_norm = self.gate_norm(x_flat.to(self.gate_.dtype))
         logits = F.linear(x_norm, self.gate_)
@@ -98,8 +94,6 @@ class MixLoraSparseMoe(nn.Module):
         for router_idx in range(current_routed_count):
             token_indices, topk_indices = torch.where(selected == router_idx)
 
-            # WE REMOVED THE IF STATEMENT HERE. NO MORE CPU SYNCS!
-
             curr_x_dense = x_flat[token_indices]
             curr_x_sparse = x_sparse[token_indices]
 
@@ -115,7 +109,14 @@ class MixLoraSparseMoe(nn.Module):
             w = weights[token_indices, topk_indices].unsqueeze(1)
             y2 = y2.index_add(0, token_indices, out_expert * w.to(out_expert.dtype))
 
-        final_output = y1 + y2
+        # Mix shared (y1, dense path) and routed (y2, sparse path):
+        # - dual_scalar_gate: scalar gate g ∈ R per token, broadcast over feature dim (Jacobian rank=1)
+        # - sparse_only / dense_only: plain sum (no mixing gate)
+        if self.branch_mode == 'dual_scalar_gate':
+            gate_val = self.scalar_gate(x_flat).to(x_flat.dtype)  # [T, 1]
+            final_output = gate_val * y1 + (1.0 - gate_val) * y2
+        else:
+            final_output = y1 + y2
 
         if self.training:
             density = F.one_hot(selected, current_routed_count).float().mean(dim=0).mean(dim=0)
