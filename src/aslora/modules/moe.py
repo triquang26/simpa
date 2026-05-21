@@ -40,15 +40,15 @@ class MixLoraSparseMoe(nn.Module):
         self.last_hidden: torch.Tensor | None = None
         self.last_routing: torch.Tensor | None = None
 
-    def _apply_lora_with_branch(self, lora_module, base_out: torch.Tensor, x_dense: torch.Tensor, x_sparse: torch.Tensor) -> torch.Tensor:
+    def _apply_lora_with_branch(self, lora_module, base_out: torch.Tensor, x_dense: torch.Tensor, x_sparse: torch.Tensor, gate_input: torch.Tensor | None = None) -> torch.Tensor:
         if self.branch_mode == 'sparse_only':
             return lora_module.lora_forward(base_out, x_sparse)
         if self.branch_mode == 'dense_only':
             return lora_module.lora_forward(base_out, x_dense)
-        # dual_scalar_gate
+        # dual_scalar_gate — gate always uses original hidden state (hidden_size-dim), not intermediate acts
         delta_dense = lora_module.lora_forward(base_out, x_dense) - base_out
         delta_sparse = lora_module.lora_forward(base_out, x_sparse) - base_out
-        g = self.scalar_gate(x_dense).to(base_out.dtype)
+        g = self.scalar_gate(gate_input if gate_input is not None else x_dense).to(base_out.dtype)
         return base_out + g * delta_dense + (1.0 - g) * delta_sparse
 
     # OPTIMIZATION: Accept pre-computed base projections to prevent re-calculation
@@ -62,7 +62,8 @@ class MixLoraSparseMoe(nn.Module):
         u = self._apply_lora_with_branch(expert_dict["up_proj"], u_base, x_dense, x_sparse) if "up_proj" in expert_dict else u_base
         act = self.act_fn_(g) * u
         d_base = self.base_layer_.down_proj(act)
-        d = self._apply_lora_with_branch(expert_dict["down_proj"], d_base, act, act) if "down_proj" in expert_dict else d_base
+        # down_proj LoRA input is `act` (intermediate, 11008-dim); gate must use original hidden state (4096-dim)
+        d = self._apply_lora_with_branch(expert_dict["down_proj"], d_base, act, act, gate_input=x_dense) if "down_proj" in expert_dict else d_base
         return d
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
