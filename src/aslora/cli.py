@@ -12,7 +12,6 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     DataCollatorForSeq2Seq,
-    TrainerCallback,
     TrainingArguments,
 )
 from transformers.modeling_utils import load_sharded_checkpoint
@@ -23,12 +22,14 @@ from aslora.config import (
     load_experiment_config,
 )
 from aslora.data.metamath import create_meta_math_dataset
+from aslora.eval.arc_easy import run_arc_easy_eval
 from aslora.eval.gsm8k import GSM8KEvalCallback, run_offline_eval
 from aslora.modules.injection import (
     initialize_mixlora_weights_for_llama,
     inject_mixlora_into_llama,
 )
-from aslora.secrets import load_secrets, login_hf_and_wandb
+from aslora.secrets import load_secrets, login_hf_and_wandb, preflight_check
+from aslora.training.callbacks import EpochSaveCallback
 from aslora.training.freezing import (
     count_trainable_parameters,
     freeze_base_model,
@@ -69,16 +70,24 @@ def _resolve_dtype(name: str):
     return _DTYPES.get(str(name).lower(), torch.bfloat16)
 
 
-class EpochSaveCallback(TrainerCallback):
-    def __init__(self, model, config, run_dir: str):
-        self.model = model
-        self.config = config
-        self.run_dir = run_dir
+def _resolve_adapter_path(adapter: str, token: str | None) -> str:
+    if os.path.isdir(adapter):
+        return adapter
+    from huggingface_hub import snapshot_download
+    return snapshot_download(repo_id=adapter, token=token or None)
 
-    def on_epoch_end(self, args, state, control, **kwargs):
-        epoch = int(state.epoch) if state.epoch is not None else 0
-        save_dir = os.path.join(self.run_dir, f"epoch_{epoch}")
-        save_mixlora_adapter_safetensors(self.model, self.config, save_dir)
+
+def _load_adapter_overrides(cfg: ExperimentConfig, adapter_path: str) -> None:
+    adapter_cfg_path = os.path.join(adapter_path, "adapter_config.json")
+    if os.path.exists(adapter_cfg_path):
+        with open(adapter_cfg_path, "r", encoding="utf-8") as f:
+            adapter_cfg = json.load(f)
+        if "branch_mode" in adapter_cfg:
+            cfg.branch_mode = adapter_cfg["branch_mode"]
+        if "target_sparsity" in adapter_cfg:
+            cfg.sparsity.target_sparsity = float(adapter_cfg["target_sparsity"])
+        if "gate_rank" in adapter_cfg:
+            cfg.moe.gate_rank = int(adapter_cfg["gate_rank"])
 
 
 def _build_mixlora_config(cfg: ExperimentConfig):
@@ -125,12 +134,35 @@ def _build_training_args(cfg: ExperimentConfig, run_name: str, output_dir: str) 
     return TrainingArguments(**kwargs)
 
 
+def _load_model_with_adapter(cfg: ExperimentConfig, adapter_path: str):
+    """Load base model, inject MixLoRA, and restore adapter weights. Returns (model, tokenizer)."""
+    dtype = _resolve_dtype(cfg.model.dtype)
+    model = AutoModelForCausalLM.from_pretrained(
+        cfg.model.name,
+        torch_dtype=dtype,
+        attn_implementation=cfg.model.attn_implementation,
+        device_map="auto",
+        trust_remote_code=True,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(adapter_path, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    mixlora_config = _build_mixlora_config(cfg)
+    mixlora_weights = initialize_mixlora_weights_for_llama(model, mixlora_config)
+    model = inject_mixlora_into_llama(model, mixlora_config, mixlora_weights)
+    load_sharded_checkpoint(model, adapter_path, strict=False)
+    model.eval()
+    return model, tokenizer, mixlora_config
+
+
 def cmd_train(args: argparse.Namespace) -> None:
     cfg: ExperimentConfig = load_experiment_config(args.config, overrides=args.override or [])
 
     _set_seed(42)
 
     secrets = load_secrets()
+    preflight_check(secrets)
     login_hf_and_wandb(secrets)
 
     if cfg.wandb.project:
@@ -181,7 +213,16 @@ def cmd_train(args: argparse.Namespace) -> None:
         pad_to_multiple_of=8,
     )
 
-    epoch_save_cb = EpochSaveCallback(model=model, config=mixlora_config, run_dir=run_dir)
+    epoch_save_cb = EpochSaveCallback(
+        model=model,
+        config=mixlora_config,
+        run_dir=run_dir,
+        hub_cfg=cfg.hub,
+        secrets=secrets,
+        model_short=model_short,
+        branch_mode=cfg.branch_mode,
+        dataset_name=cfg.data.dataset,
+    )
 
     trainer = MixLoraTrainer(
         model=model,
@@ -196,8 +237,29 @@ def cmd_train(args: argparse.Namespace) -> None:
     final_dir = os.path.join(run_dir, "final")
     save_full_adapter_for_resume(model, mixlora_config, tokenizer, final_dir)
 
-    # Free training state before eval so we can use a larger batch size without OOM.
     global_step = int(trainer.state.global_step)
+    token = secrets.get("HF_TOKEN") or None
+    repo_id = None
+    if cfg.hub.push_after_train:
+        repo_name = cfg.hub.repo_template.format(model_short=model_short, branch_mode=cfg.branch_mode)
+        repo_id = f"{cfg.hub.username}/{repo_name}"
+        print(f"\n[HF] Pushing to {repo_id} (before eval) ...")
+        try:
+            push_to_hub_with_card(
+                local_dir=final_dir,
+                repo_id=repo_id,
+                branch_mode=cfg.branch_mode,
+                dataset_name=cfg.data.dataset,
+                num_steps=global_step,
+                gsm8k_accuracy=None,
+                token=token,
+                private=secrets.get("HF_PRIVATE", False),
+                base_model=cfg.model.name,
+            )
+        except Exception as e:
+            print(f"[HF push pre-eval] failed: {e!r}")
+
+    # Free training state before eval to reclaim GPU memory.
     try:
         if getattr(trainer, "optimizer", None) is not None:
             del trainer.optimizer
@@ -231,44 +293,26 @@ def cmd_train(args: argparse.Namespace) -> None:
     except Exception as e:
         print(f"GSM8K eval failed: {e!r}")
 
-    if cfg.hub.push_after_train and secrets.get("HF_TOKEN"):
-        repo_name = cfg.hub.repo_template.format(model_short=model_short, branch_mode=cfg.branch_mode)
-        repo_id = f"{cfg.hub.username}/{repo_name}"
-        push_to_hub_with_card(
-            local_dir=final_dir,
-            repo_id=repo_id,
-            branch_mode=cfg.branch_mode,
-            dataset_name=cfg.data.dataset,
-            num_steps=global_step,
-            gsm8k_accuracy=last_acc,
-            token=secrets["HF_TOKEN"],
-            private=secrets.get("HF_PRIVATE", False),
-        )
-
-
-def _resolve_adapter_path(adapter: str, token: str | None) -> str:
-    if os.path.isdir(adapter):
-        return adapter
-    from huggingface_hub import snapshot_download
-    return snapshot_download(repo_id=adapter, token=token or None)
-
-
-def _load_adapter_overrides(cfg: ExperimentConfig, adapter_path: str) -> None:
-    adapter_cfg_path = os.path.join(adapter_path, "adapter_config.json")
-    if os.path.exists(adapter_cfg_path):
-        with open(adapter_cfg_path, "r", encoding="utf-8") as f:
-            adapter_cfg = json.load(f)
-        if "branch_mode" in adapter_cfg:
-            cfg.branch_mode = adapter_cfg["branch_mode"]
-        if "target_sparsity" in adapter_cfg:
-            cfg.sparsity.target_sparsity = float(adapter_cfg["target_sparsity"])
-        if "gate_rank" in adapter_cfg:
-            cfg.moe.gate_rank = int(adapter_cfg["gate_rank"])
+    if repo_id and cfg.hub.push_after_train:
+        print(f"\n[HF] Updating card with eval results on {repo_id} ...")
+        try:
+            push_to_hub_with_card(
+                local_dir=final_dir,
+                repo_id=repo_id,
+                branch_mode=cfg.branch_mode,
+                dataset_name=cfg.data.dataset,
+                num_steps=global_step,
+                gsm8k_accuracy=last_acc,
+                token=token,
+                private=secrets.get("HF_PRIVATE", False),
+                base_model=cfg.model.name,
+            )
+        except Exception as e:
+            print(f"[HF push post-eval] failed: {e!r}")
 
 
 def cmd_eval(args: argparse.Namespace) -> None:
     cfg: ExperimentConfig = load_experiment_config(args.config, overrides=args.override or [])
-
     _set_seed(42)
     secrets = load_secrets()
     login_hf_and_wandb(secrets)
@@ -276,27 +320,13 @@ def cmd_eval(args: argparse.Namespace) -> None:
     adapter_path = _resolve_adapter_path(args.adapter, secrets.get("HF_TOKEN") or None)
     _load_adapter_overrides(cfg, adapter_path)
 
-    dtype = _resolve_dtype(cfg.model.dtype)
-    model = AutoModelForCausalLM.from_pretrained(
-        cfg.model.name,
-        torch_dtype=dtype,
-        attn_implementation=cfg.model.attn_implementation,
-        device_map="auto",
-        trust_remote_code=True,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(adapter_path, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    mixlora_config = _build_mixlora_config(cfg)
-    mixlora_weights = initialize_mixlora_weights_for_llama(model, mixlora_config)
-    model = inject_mixlora_into_llama(model, mixlora_config, mixlora_weights)
-
-    load_sharded_checkpoint(model, adapter_path, strict=False)
-    model.eval()
+    model, tokenizer, _ = _load_model_with_adapter(cfg, adapter_path)
 
     acc = run_offline_eval(model, tokenizer, batch_size=cfg.eval.gsm8k_batch_size)
     print(f"Final GSM8K accuracy: {acc:.4f}")
+
+    arc_acc = run_arc_easy_eval(model, tokenizer, batch_size=cfg.eval.arc_easy_batch_size)
+    print(f"Final ARC-Easy accuracy: {arc_acc:.4f}")
 
 
 def cmd_measure(args: argparse.Namespace) -> None:
@@ -312,23 +342,7 @@ def cmd_measure(args: argparse.Namespace) -> None:
     adapter_path = _resolve_adapter_path(args.adapter, secrets.get("HF_TOKEN") or None)
     _load_adapter_overrides(cfg, adapter_path)
 
-    dtype = _resolve_dtype(cfg.model.dtype)
-    model = AutoModelForCausalLM.from_pretrained(
-        cfg.model.name,
-        torch_dtype=dtype,
-        attn_implementation=cfg.model.attn_implementation,
-        device_map="auto",
-        trust_remote_code=True,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(adapter_path, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    mixlora_config = _build_mixlora_config(cfg)
-    mixlora_weights = initialize_mixlora_weights_for_llama(model, mixlora_config)
-    model = inject_mixlora_into_llama(model, mixlora_config, mixlora_weights)
-    load_sharded_checkpoint(model, adapter_path, strict=False)
-    model.eval()
+    model, tokenizer, _ = _load_model_with_adapter(cfg, adapter_path)
 
     dataset = create_meta_math_dataset(
         tokenizer,

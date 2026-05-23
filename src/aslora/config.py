@@ -127,6 +127,7 @@ class TrainCfg:
 class EvalCfg:
     gsm8k_batch_size: int = 4
     max_new_tokens: int = 512
+    arc_easy_batch_size: int = 4
 
 
 @dataclass

@@ -46,28 +46,35 @@ def push_to_hub_with_card(
     gsm8k_accuracy: Optional[float],
     token: str,
     private: bool = False,
+    base_model: str = "meta-llama/Llama-2-7b-hf",
 ):
     from huggingface_hub import HfApi
+    _token = token or None  # None → huggingface_hub uses cached credential
     api = HfApi()
-    api.create_repo(repo_id=repo_id, exist_ok=True, private=private, token=token)
+    api.create_repo(repo_id=repo_id, exist_ok=True, private=private, token=_token)
 
-    acc_line = f"- GSM8K accuracy: {gsm8k_accuracy:.4f}\n" if gsm8k_accuracy is not None else ""
+    acc_line = f"- GSM8K accuracy: {gsm8k_accuracy:.4f}\n" if gsm8k_accuracy is not None else "- GSM8K accuracy: pending eval\n"
     card = (
         f"# {repo_id}\n\n"
-        f"MixLoRA adapter (ASLoRA) trained on top of `meta-llama/Llama-2-7b-hf`.\n\n"
+        f"MixLoRA adapter (ASLoRA) trained on top of `{base_model}`.\n\n"
         f"## Training details\n\n"
         f"- Branch mode: `{branch_mode}`\n"
         f"- Dataset: `{dataset_name}`\n"
         f"- Training steps: {num_steps}\n"
         f"{acc_line}"
-        f"- Base model: `meta-llama/Llama-2-7b-hf`\n"
+        f"- Base model: `{base_model}`\n"
     )
     with open(os.path.join(local_dir, "README.md"), "w", encoding="utf-8") as f:
         f.write(card)
 
+    commit_msg = (
+        f"Update eval results ({branch_mode})" if gsm8k_accuracy is not None
+        else f"Upload ASLoRA adapter ({branch_mode})"
+    )
     api.upload_folder(
         folder_path=local_dir,
         repo_id=repo_id,
-        token=token,
-        commit_message=f"Upload ASLoRA adapter ({branch_mode})",
+        token=_token,
+        commit_message=commit_msg,
     )
+    print(f"Pushed to https://huggingface.co/{repo_id}")

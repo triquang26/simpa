@@ -37,6 +37,7 @@ train:
 eval:
   gsm8k_batch_size: 32
   max_new_tokens: 512
+  arc_easy_batch_size: 32
 hub:
   username: twanghcmut
   repo_template: "{model_short}-aslora-{branch_mode}"
