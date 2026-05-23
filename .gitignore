@@ -16,3 +16,6 @@ __pycache__/
 
 # misc
 .nbref/
+.claude/
+PLAN.md
+ASLoRA2.ipynb

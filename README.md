@@ -1,7 +1,7 @@
 # SIMPA — Sparse / Dense / Dual-Gate LoRA-MoE (EMNLP)
 
-SIMPA is a refactor of the historical source artifact `ASLoRA2.ipynb` into a reproducible
-research repo. Three ablations:
+SIMPA is a reproducible research repo for sparse / dense / dual-gate LoRA-MoE
+experiments. Three ablations:
 
 1. **Sparse-only** — LoRA path operates on a top-k sparsified input.
 2. **Dense-only** — Standard LoRA (sparsify bypassed).
