@@ -1,5 +1,5 @@
 """
-Experiment A: Jaccard + Retention Ratio sweep on Full ASLoRA (column-wise output_gate).
+Experiment A: Jaccard + Retention Ratio sweep on SIMPA (column-wise output_gate).
 
 Measures J̄_p and ρ(p) for p ∈ {0.3, 0.5, 0.7, 0.8, 0.9}.
 Single forward pass per batch — all p values computed from same last_hidden.
@@ -34,7 +34,7 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForSeq2Seq
 
-from measure_jaccard_aslora import MixLoraSparseMoe, inject_full_aslora
+from measure_jaccard_aslora import MixLoraSparseMoe, inject_full_simpa
 from aslora.data.metamath import create_meta_math_dataset
 from aslora.secrets import load_secrets, login_hf_and_wandb
 
@@ -60,7 +60,7 @@ def run_sweep(
         if isinstance(m, MixLoraSparseMoe)
     ]
     if not moe_modules:
-        raise RuntimeError("No MixLoraSparseMoe modules found — was inject_full_aslora called?")
+        raise RuntimeError("No MixLoraSparseMoe modules found — was inject_full_simpa called?")
 
     jac_scores = {name: {p: [] for p in p_values} for name, _ in moe_modules}
     rho_accum  = {name: {p: {"num": 0.0, "den": 0.0} for p in p_values} for name, _ in moe_modules}
@@ -191,7 +191,7 @@ def write_markdown_table(results: list[dict], path: str) -> None:
 
 def print_table(results: list[dict]) -> None:
     print("\n" + "=" * 62)
-    print("  Experiment A — Full ASLoRA (column-wise output_gate)")
+    print("  Experiment A — SIMPA (column-wise output_gate)")
     print("=" * 62)
     print(f"  {'p':>5}  {'J̄':>8}  {'ρ(p)':>8}  {'S=1-J̄':>8}  {'U=S·ρ':>8}  {'Bound':>8}")
     print("  " + "-" * 58)
@@ -263,8 +263,8 @@ def main() -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print("[2/5] Injecting Full ASLoRA architecture (column-wise output_gate)...")
-    inject_full_aslora(model)
+    print("[2/5] Injecting SIMPA architecture (column-wise output_gate)...")
+    inject_full_simpa(model)
     device = next(model.parameters()).device
     model.to(device=device, dtype=torch.bfloat16)
 

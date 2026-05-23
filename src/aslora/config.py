@@ -19,7 +19,7 @@ def create_mixlora_config_for_llama(
 
     # Sparsity Params
     target_sparsity: float = 0.3,
-    models_path: str = "/root/TEAL/models/Llama-2-7B",
+    models_path: str = "/root/simpa/models/Llama-2-7B",
     gate_rank: int = 16,
     branch_mode: str = "sparse_only",
 ):
@@ -133,13 +133,13 @@ class EvalCfg:
 @dataclass
 class HubCfg:
     username: str = "twanghcmut"
-    repo_template: str = "{model_short}-aslora-{branch_mode}"
+    repo_template: str = "{model_short}-simpa-{branch_mode}"
     push_after_train: bool = True
 
 
 @dataclass
 class WandbCfg:
-    project: str = "aslora-emnlp"
+    project: str = "simpa-emnlp"
     run_name_template: str = "{model_short}-{branch_mode}"
 
 

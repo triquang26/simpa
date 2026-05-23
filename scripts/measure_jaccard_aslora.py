@@ -1,4 +1,4 @@
-"""Measure Jaccard E1 on the user's full ASLoRA checkpoint (column-wise output_gate).
+"""Measure Jaccard E1 on the user's SIMPA checkpoint (column-wise output_gate).
 
 Reconstructs the exact architecture used to train the checkpoint at
 twanghcmut/Llama-2-7b-hf-gsm8k, then loads weights and runs the per-expert
@@ -42,10 +42,10 @@ GATE_RANK = 16
 LORA_R = 16
 LORA_ALPHA = 32
 LORA_DROPOUT = 0.05
-P_SPARSIFY = 0.7  # ASLoRA standard: drop 70%, keep top 30%
+P_SPARSIFY = 0.7  # SIMPA standard: drop 70%, keep top 30%
 
 
-# === Architecture reconstruction (matches the user's original ASLoRA) ===
+# === Architecture reconstruction (matches the user's original SIMPA) ===
 
 
 class SparsifyModule(nn.Module):
@@ -165,8 +165,8 @@ class MixLoraSparseMoe(nn.Module):
         return final.view(batch_shape)
 
 
-def inject_full_aslora(model):
-    """Inject the user's exact full ASLoRA architecture (attn LoRA + mlp.mixlora_moes.default)."""
+def inject_full_simpa(model):
+    """Inject the user's exact SIMPA architecture (attn LoRA + mlp.mixlora_moes.default)."""
     lora_cfg = _make_lora_config()
     for layer in model.model.layers:
         # Attention LoRA (q/k/v/o)
@@ -184,6 +184,9 @@ def inject_full_aslora(model):
                 return mlp_module.mixlora_moes["default"](x)
             return fwd
         layer.mlp.forward = make_forward(layer.mlp)
+
+
+inject_full_aslora = inject_full_simpa
 
 
 # === Jaccard E1 measurement ===
@@ -398,8 +401,8 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print(f"[2/4] Injecting full ASLoRA architecture (attn LoRA + mlp.mixlora_moes.default + output_gate)...")
-    inject_full_aslora(model)
+    print(f"[2/4] Injecting SIMPA architecture (attn LoRA + mlp.mixlora_moes.default + output_gate)...")
+    inject_full_simpa(model)
     # Move all newly-injected modules onto the same device/dtype as base model
     device = next(model.parameters()).device
     model.to(device=device, dtype=torch.bfloat16)
@@ -484,7 +487,7 @@ def main():
 
     print()
     print("=" * 66)
-    print(f"  Jaccard E1 — Full ASLoRA (column-wise output_gate), p={P_SPARSIFY}")
+    print(f"  Jaccard E1 — SIMPA (column-wise output_gate), p={P_SPARSIFY}")
     print("=" * 66)
     print(f"  Mean Jaccard:                 {res['mean_jaccard']:.4f}")
     print(f"  Theoretical bound (Prop. 1):  {res['theoretical_bound']:.4f}")
@@ -500,7 +503,7 @@ def main():
     print(f"  Paper Table 6 entries:")
     print(f"    Method     p    J̄        Bound (Prop. 1)")
     print(f"    MixLoRA    0.0  1.000    1.000   (trivial: no mask → S_p = all d dims)")
-    print(f"    ASLoRA     0.7  {res['mean_jaccard']:.3f}    {res['theoretical_bound']:.3f}")
+    print(f"    SIMPA     0.7  {res['mean_jaccard']:.3f}    {res['theoretical_bound']:.3f}")
 
 
 if __name__ == "__main__":

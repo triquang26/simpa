@@ -31,7 +31,7 @@ torch.set_float32_matmul_precision("high")
 
 MODEL_ID    = "meta-llama/Meta-Llama-3-8B"
 HF_USERNAME = "twanghcmut"
-HF_REPO_NAME = "Meta-Llama-3-8B-aslora-dual_scalar_gate-arc"
+HF_REPO_NAME = "Meta-Llama-3-8B-simpa-dual_scalar_gate-arc"
 
 
 def main():
@@ -114,7 +114,7 @@ def main():
         api.upload_folder(
             folder_path=adapter_dir,
             repo_id=HF_REPO_ARC,
-            commit_message="Upload MixLoRA dual_scalar_gate adapter — ARC-Easy",
+            commit_message="Upload SIMPA dual_scalar_gate adapter — ARC-Easy",
         )
         print(f"Adapter pushed to https://huggingface.co/{HF_REPO_ARC}")
 

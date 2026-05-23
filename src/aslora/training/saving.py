@@ -56,7 +56,7 @@ def push_to_hub_with_card(
     acc_line = f"- GSM8K accuracy: {gsm8k_accuracy:.4f}\n" if gsm8k_accuracy is not None else "- GSM8K accuracy: pending eval\n"
     card = (
         f"# {repo_id}\n\n"
-        f"MixLoRA adapter (ASLoRA) trained on top of `{base_model}`.\n\n"
+        f"MixLoRA adapter (SIMPA) trained on top of `{base_model}`.\n\n"
         f"## Training details\n\n"
         f"- Branch mode: `{branch_mode}`\n"
         f"- Dataset: `{dataset_name}`\n"
@@ -69,7 +69,7 @@ def push_to_hub_with_card(
 
     commit_msg = (
         f"Update eval results ({branch_mode})" if gsm8k_accuracy is not None
-        else f"Upload ASLoRA adapter ({branch_mode})"
+        else f"Upload SIMPA adapter ({branch_mode})"
     )
     api.upload_folder(
         folder_path=local_dir,

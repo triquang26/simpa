@@ -39,8 +39,8 @@ eval:
   max_new_tokens: 512
 hub:
   username: twanghcmut
-  repo_template: "{model_short}-aslora-{branch_mode}"
+  repo_template: "{model_short}-simpa-{branch_mode}"
   push_after_train: true
 wandb:
-  project: aslora-emnlp
+  project: simpa-emnlp
   run_name_template: "{model_short}-{branch_mode}"

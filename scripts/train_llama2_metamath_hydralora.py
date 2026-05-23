@@ -1,8 +1,8 @@
 """Train HydraLoRA on MetaMathQA-100k with Llama-2-7b-hf, then eval GSM8K.
 
-Matches the ASLoRA repo's canonical pipeline (configs/dual_scalar_gate.yaml,
+Matches the SIMPA repo's canonical pipeline (configs/dual_scalar_gate.yaml,
 src/aslora/cli.py::cmd_train) but swaps the parameter-efficient module from
-MixLoRA/ASLoRA to HydraLoRA (Tian et al., NeurIPS 2024).
+MixLoRA/SIMPA to HydraLoRA (Tian et al., NeurIPS 2024).
 
 Pipeline (same as sibling scripts in this repo):
   1. Inject HydraLoRA into Llama-2-7b-hf.
@@ -12,7 +12,7 @@ Pipeline (same as sibling scripts in this repo):
   5. Eval GSM8K test (batch 32) — separate script, after the push.
 
 HydraLoRA architecture (paper) with rank scaled up to ~2.9% trainable so the
-comparison vs ASLoRA is at an equal parameter budget. We keep N=4 B-heads and
+comparison vs SIMPA is at an equal parameter budget. We keep N=4 B-heads and
 the MLP-only target set (gate/up/down_proj) per the paper's design and only
 scale rank: r=50 → 202.3M trainable / 6.94B ≈ 2.91%.
 
@@ -54,7 +54,7 @@ HF_REPO_NAME = "Llama-2-7b-hf-hydralora-r50-metamath"
 RUN_DIR      = os.path.join("outputs", HF_REPO_NAME)
 
 # HydraLoRA architecture (paper): asymmetric LoRA, N=4 B-heads, MLP-only targets
-# (gate/up/down_proj). Rank scaled UP to match ASLoRA's ~2.9% trainable budget
+# (gate/up/down_proj). Rank scaled UP to match SIMPA's ~2.9% trainable budget
 # for an equal-parameter-budget comparison (per-layer params on Llama2-7B:
 # 76800 + 123648·r; with r=50 over 32 layers → 202.3M / 6.94B ≈ 2.91%).
 HYDRA_R         = 50
@@ -125,7 +125,7 @@ def main():
     secrets = load_secrets()
     preflight_check(secrets)
     login_hf_and_wandb(secrets)
-    os.environ.setdefault("WANDB_PROJECT", "aslora-hydralora")
+    os.environ.setdefault("WANDB_PROJECT", "simpa-hydralora")
 
     print(f"[load] {MODEL_ID}")
     model = AutoModelForCausalLM.from_pretrained(

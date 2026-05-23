@@ -4,14 +4,14 @@
 
 # ── CONFIG (chỉnh ở đây) ─────────────────────────────────────────────
 ADAPTER_PATH    = "twanghcmut/Llama-2-7b-hf-densense-gsm8k"
-ASLORA_SRC      = "/root/aslora-code/src"     # nơi chứa aslora package
+PACKAGE_SRC     = "/root/aslora-code/src"     # nơi chứa aslora package
 MIXLORA_SRC     = "/root/aslora-code/third_party/mixlora"
 EVAL_BATCH_SIZE = 64
 MAX_NEW_TOKENS  = 512
 # ─────────────────────────────────────────────────────────────────────
 
 import sys, os, json
-sys.path.insert(0, ASLORA_SRC)
+sys.path.insert(0, PACKAGE_SRC)
 sys.path.insert(0, MIXLORA_SRC)
 
 import torch
