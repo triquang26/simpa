@@ -18,11 +18,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-import numpy as np
+# Force a non-interactive backend BEFORE pyplot import. Notebook envs set
+# MPLBACKEND=module://matplotlib_inline.backend_inline which fails without
+# an IPython kernel; "Agg" produces PDF/PNG without any display.
+os.environ.pop("MPLBACKEND", None)
+import matplotlib  # noqa: E402
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
 
 
 LOCATION_ORDER = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
