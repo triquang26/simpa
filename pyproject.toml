@@ -17,6 +17,7 @@ dependencies = [
   "python-dotenv",
   "lm-eval[hf]",
   "tiktoken",
+  "matplotlib>=3.7",
   # vendored mixlora installed as path dep (see [tool.uv.sources])
   "mixlora",
 ]
