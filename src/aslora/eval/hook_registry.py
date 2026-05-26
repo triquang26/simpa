@@ -34,18 +34,29 @@ def _make_pre_hook(loc_key: str, accumulator, dedupe: bool = False):
     return hook
 
 
-def register_adapter_hooks(model, accumulator) -> tuple[list, dict[str, list[str]]]:
+def register_adapter_hooks(model, accumulator, mode: str = "trained") -> tuple[list, dict[str, list[str]]]:
     """Register forward_pre_hooks on each transformer layer.
 
-    For each transformer layer i (model.model.layers[i]):
-      - q_proj input -> "layer_i/attn_qkv_in" (aliased by Q/K/V)
-      - o_proj input -> "layer_i/attn_o_in"
-      - MoE input    -> "layer_i/mlp_in"     (aliased by gate_proj/up_proj)
-      - down_proj input (base) -> "layer_i/mlp_down_in" (dedup via fired flag)
+    mode="trained" (SIMPA / ASLoRA injected):
+      - q_proj input              -> "layer_i/attn_qkv_in" (Q/K/V alias)
+      - o_proj input              -> "layer_i/attn_o_in"
+      - MixLoraSparseMoe input    -> "layer_i/mlp_in"     (gate/up alias)
+      - moe.base_layer_.down_proj -> "layer_i/mlp_down_in" (dedup; gate/up share input)
+
+    mode="pretrained" (plain HF LLaMA, no ASLoRA):
+      - layer.self_attn.q_proj    -> "layer_i/attn_qkv_in"
+      - layer.self_attn.o_proj    -> "layer_i/attn_o_in"
+      - layer.mlp.gate_proj       -> "layer_i/mlp_in"     (gate/up share input;
+                                                            we hook gate_proj as the
+                                                            canonical reader)
+      - layer.mlp.down_proj       -> "layer_i/mlp_down_in"
 
     Returns (handles, name_map). name_map keys are the 7 logical adapter names
     and values are the per-layer loc_key lists.
     """
+    if mode not in ("trained", "pretrained"):
+        raise ValueError(f"mode must be 'trained' or 'pretrained', got {mode!r}")
+
     if not hasattr(model, "model") or not hasattr(model.model, "layers"):
         raise RuntimeError(
             "register_adapter_hooks expects a LLaMA-like model with model.model.layers"
@@ -54,18 +65,17 @@ def register_adapter_hooks(model, accumulator) -> tuple[list, dict[str, list[str
     layers = model.model.layers
     n_layers = len(layers)
 
-    # Discover MoE modules indexed by layer position.
     moe_by_layer: dict[int, nn.Module] = {}
-    for name, m in model.named_modules():
-        if isinstance(m, MixLoraSparseMoe):
-            # Names look like "model.layers.<i>.mlp.mixlora_moes.default"
-            parts = name.split(".")
-            try:
-                idx = parts.index("layers")
-                layer_i = int(parts[idx + 1])
-                moe_by_layer[layer_i] = m
-            except (ValueError, IndexError):
-                continue
+    if mode == "trained":
+        for name, m in model.named_modules():
+            if isinstance(m, MixLoraSparseMoe):
+                parts = name.split(".")
+                try:
+                    idx = parts.index("layers")
+                    layer_i = int(parts[idx + 1])
+                    moe_by_layer[layer_i] = m
+                except (ValueError, IndexError):
+                    continue
 
     handles: list = []
     name_map: dict[str, list[str]] = {
@@ -92,14 +102,24 @@ def register_adapter_hooks(model, accumulator) -> tuple[list, dict[str, list[str
         o_proj = layer.self_attn.o_proj
         handles.append(o_proj.register_forward_pre_hook(_make_pre_hook(attn_o_key, accumulator)))
 
-        moe = moe_by_layer.get(i)
-        if moe is not None:
-            handles.append(moe.register_forward_pre_hook(_make_pre_hook(mlp_in_key, accumulator)))
-            base_down = moe.base_layer_.down_proj
-            handles.append(
-                base_down.register_forward_pre_hook(
-                    _make_pre_hook(mlp_down_key, accumulator, dedupe=True)
+        if mode == "trained":
+            moe = moe_by_layer.get(i)
+            if moe is not None:
+                handles.append(moe.register_forward_pre_hook(_make_pre_hook(mlp_in_key, accumulator)))
+                base_down = moe.base_layer_.down_proj
+                handles.append(
+                    base_down.register_forward_pre_hook(
+                        _make_pre_hook(mlp_down_key, accumulator, dedupe=True)
+                    )
                 )
+        else:
+            # Plain HF LLaMA: layer.mlp.{gate,up,down}_proj are nn.Linear directly.
+            mlp = layer.mlp
+            handles.append(
+                mlp.gate_proj.register_forward_pre_hook(_make_pre_hook(mlp_in_key, accumulator))
+            )
+            handles.append(
+                mlp.down_proj.register_forward_pre_hook(_make_pre_hook(mlp_down_key, accumulator))
             )
 
         name_map["q_proj"].append(attn_qkv_key)

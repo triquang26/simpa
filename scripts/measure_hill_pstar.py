@@ -71,25 +71,48 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out", type=str, default="outputs/hill_pstar/hill_results.json")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--p-grid-optimum", type=float, default=0.7)
+    p.add_argument(
+        "--mode",
+        choices=("trained", "pretrained"),
+        default="trained",
+        help="trained: load twanghcmut SIMPA checkpoint; pretrained: plain HF backbone only.",
+    )
+    p.add_argument(
+        "--base-model",
+        type=str,
+        default="meta-llama/Llama-2-7b-hf",
+        help="HF base model id (used as the backbone in both modes).",
+    )
+    p.add_argument(
+        "--auto-plot",
+        action="store_true",
+        help="After writing JSON, also render Hill curves / heatmap / pstar figures.",
+    )
     return p.parse_args()
 
 
-def _load_model(secrets: dict, device_hint: str):
-    print("[1/4] Loading base Llama-2-7b-hf...", flush=True)
+def _load_model(secrets: dict, mode: str, base_model: str):
+    print(f"[1/4] Loading base {base_model}...", flush=True)
     model = AutoModelForCausalLM.from_pretrained(
-        "meta-llama/Llama-2-7b-hf",
+        base_model,
         torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
         attn_implementation="eager",
     )
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    device = next(model.parameters()).device
+
+    if mode == "pretrained":
+        print("[2/4] Pretrained mode: skipping ASLoRA injection and checkpoint load.", flush=True)
+        print("[3/4] No checkpoint to load.", flush=True)
+        model.eval()
+        return model, tokenizer, device
 
     print("[2/4] Injecting full ASLoRA (attn LoRA + mlp.mixlora_moes.default + output_gate)...", flush=True)
     inject_full_aslora(model)
-    device = next(model.parameters()).device
     model.to(device=device, dtype=torch.bfloat16)
 
     print(f"[3/4] Downloading checkpoint {REPO_ID}...", flush=True)
@@ -162,7 +185,7 @@ def main(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    model, tokenizer, device = _load_model(secrets, device_hint="auto")
+    model, tokenizer, device = _load_model(secrets, mode=args.mode, base_model=args.base_model)
 
     print("[4/4] Building MetaMathQA dataloader...", flush=True)
     n_total = args.n_batches * args.batch_size + args.batch_size + args.n_batches_warmup * args.batch_size
@@ -191,7 +214,8 @@ def main(args: argparse.Namespace) -> None:
                     break
                 batch = {k: v.to(device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
                 model(**batch)
-                _clear_moe_buffers(model)
+                if args.mode == "trained":
+                    _clear_moe_buffers(model)
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 warmup_done += 1
@@ -201,8 +225,8 @@ def main(args: argparse.Namespace) -> None:
         max_samples_per_loc=args.max_samples_per_loc,
         seed=args.seed,
     )
-    handles, name_map = register_adapter_hooks(model, accumulator)
-    print(f"[hooks] registered {len(handles)} forward_pre_hooks", flush=True)
+    handles, name_map = register_adapter_hooks(model, accumulator, mode=args.mode)
+    print(f"[hooks] registered {len(handles)} forward_pre_hooks (mode={args.mode})", flush=True)
 
     processed = 0
     skipped = 0
@@ -217,7 +241,8 @@ def main(args: argparse.Namespace) -> None:
         reset_down_fired_flags(model)
         with torch.no_grad():
             model(**batch)
-        _clear_moe_buffers(model)
+        if args.mode == "trained":
+            _clear_moe_buffers(model)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         processed += 1
@@ -317,10 +342,11 @@ def main(args: argparse.Namespace) -> None:
             "n_batches_warmup": args.n_batches_warmup,
             "seed": args.seed,
             "p_grid_optimum": args.p_grid_optimum,
-            "model_repo_id": REPO_ID,
-            "base_model": "meta-llama/Llama-2-7b-hf",
+            "model_repo_id": REPO_ID if args.mode == "trained" else None,
+            "base_model": args.base_model,
+            "mode": args.mode,
             "hidden_size": HIDDEN_SIZE,
-            "p_sparsify_train": P_SPARSIFY,
+            "p_sparsify_train": P_SPARSIFY if args.mode == "trained" else None,
             "n_layers": n_layers,
         },
         "sanity": sanity_block,
@@ -340,6 +366,39 @@ def main(args: argparse.Namespace) -> None:
     print(f"  beta_median            = {aggregate['beta_median']:.4f}")
     print(f"  pstar_pred_mean        = {aggregate['pstar_pred_mean']:.4f}  (grid={aggregate['pstar_grid']:.2f}, gap={aggregate['gap']:+.4f})")
     print(f"  retention_at_0.7_mean  = {aggregate['retention_at_0.7_mean']:.4f}")
+
+    if args.auto_plot:
+        try:
+            _SCRIPTS = Path(__file__).resolve().parent
+            if str(_SCRIPTS) not in sys.path:
+                sys.path.insert(0, str(_SCRIPTS))
+            import plot_hill_curves  # noqa: E402
+
+            plot_out_dir = out_path.parent / out_path.stem
+            print(f"\n[auto-plot] rendering figures into {plot_out_dir}/ ...", flush=True)
+            plot_args = argparse.Namespace(
+                in_path=str(out_path),
+                out_dir=str(plot_out_dir),
+                curve_layers=[0, 8, 15, 23, n_layers - 1],
+                curve_locations=["q_proj", "o_proj", "gate_proj", "down_proj"],
+            )
+            # plot_hill_curves.main() reads its own argparse; call its building blocks directly.
+            results_loaded = plot_hill_curves.load_results(Path(plot_args.in_path))
+            grouped = plot_hill_curves.group_by_location(results_loaded["per_location"])
+            out_d = Path(plot_args.out_dir)
+            out_d.mkdir(parents=True, exist_ok=True)
+            plot_hill_curves.plot_hill_curves(
+                grouped, plot_args.curve_layers, plot_args.curve_locations,
+                out_d / "fig1_hill_curves.pdf",
+            )
+            plot_hill_curves.plot_beta_heatmap(grouped, n_layers, out_d / "fig2_beta_heatmap.pdf")
+            plot_hill_curves.plot_pstar_per_location(
+                grouped,
+                float(results_loaded.get("config", {}).get("p_grid_optimum", 0.7)),
+                out_d / "fig3_pstar_per_loc.pdf",
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"[auto-plot] skipped due to error: {e}", flush=True)
 
 
 if __name__ == "__main__":
