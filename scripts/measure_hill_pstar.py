@@ -46,7 +46,6 @@ from aslora.eval.hook_registry import register_adapter_hooks, reset_down_fired_f
 from aslora.secrets import load_secrets, login_hf_and_wandb
 
 from measure_jaccard_aslora import (  # noqa: E402
-    HIDDEN_SIZE,
     P_SPARSIFY,
     REPO_ID,
     MixLoraSparseMoe,
@@ -66,6 +65,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--block-size", type=int, default=32)
     p.add_argument("--k-frac", type=float, default=0.05)
+    p.add_argument(
+        "--k-frac-list",
+        type=str,
+        default="",
+        help="Comma-separated extra k_frac values (e.g. '0.02,0.05,0.10') to "
+             "additionally estimate beta_hat at, per (location,layer), for "
+             "plateau diagnosis. The primary beta_hat/pstar always use --k-frac.",
+    )
     p.add_argument("--max-samples-per-loc", type=int, default=2_000_000)
     p.add_argument("--n-batches-warmup", type=int, default=1)
     p.add_argument("--out", type=str, default="outputs/hill_pstar/hill_results.json")
@@ -252,6 +259,9 @@ def main(args: argparse.Namespace) -> None:
         h.remove()
 
     n_layers = len(model.model.layers)
+    real_hidden_size = int(model.config.hidden_size)
+
+    k_frac_list = [float(s) for s in args.k_frac_list.split(",") if s.strip()]
 
     per_location: list[dict] = []
     for logical_name in LOGICAL_NAMES:
@@ -265,6 +275,7 @@ def main(args: argparse.Namespace) -> None:
                 rho_at_pstar = float("nan")
                 rho_at_grid = float("nan")
                 hp = {"k": [], "beta_hat": []}
+                beta_by_kfrac = {kf: float("nan") for kf in k_frac_list}
             else:
                 beta = float(hill_estimator(samples, k_frac=args.k_frac))
                 if np.isnan(beta):
@@ -276,12 +287,14 @@ def main(args: argparse.Namespace) -> None:
                     rho_at_pstar = float(predicted_retention(beta, pstar))
                     rho_at_grid = float(predicted_retention(beta, args.p_grid_optimum))
                 hp = hill_plot_data(samples, n_points=40) if n_s >= 400 else {"k": [], "beta_hat": []}
+                beta_by_kfrac = {kf: float(hill_estimator(samples, k_frac=kf)) for kf in k_frac_list}
             per_location.append({
                 "layer": i,
                 "location": logical_name,
                 "loc_key": loc_key,
                 "n_samples": n_s,
                 "beta_hat": beta,
+                "beta_hat_by_kfrac": beta_by_kfrac,
                 "pstar_pred": pstar,
                 "retention_at_pstar": rho_at_pstar,
                 "retention_at_0.7": rho_at_grid,
@@ -345,7 +358,8 @@ def main(args: argparse.Namespace) -> None:
             "model_repo_id": REPO_ID if args.mode == "trained" else None,
             "base_model": args.base_model,
             "mode": args.mode,
-            "hidden_size": HIDDEN_SIZE,
+            "hidden_size": real_hidden_size,
+            "k_frac_list": k_frac_list,
             "p_sparsify_train": P_SPARSIFY if args.mode == "trained" else None,
             "n_layers": n_layers,
         },

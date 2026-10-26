@@ -75,7 +75,22 @@ def _inject_llama_mlp_module(layer_idx, mlp, config, weights: Optional[Dict] = N
 
 def inject_mixlora_into_llama(model, config, weights: Optional[Dict] = None):
     config.model_type_ = model.config.model_type
+    # MixLoraSparseMoe reads config.hidden_size (default 4096) to size its
+    # gate/scalar_gate/x_flat view. MixLoraConfig itself never sets this, so
+    # any backbone with a non-4096 hidden size (e.g. Qwen2.5-7B at 3584)
+    # would silently build wrongly-shaped router/gate params without this.
+    config.hidden_size = model.config.hidden_size
     model._mixlora_config = config
+
+    if not (hasattr(model, 'model') and hasattr(model.model, 'layers')
+            and len(model.model.layers) > 0
+            and hasattr(model.model.layers[0], 'mlp')
+            and hasattr(model.model.layers[0].mlp, 'gate_proj')):
+        raise ValueError(
+            "inject_mixlora_into_llama expects a model with "
+            "model.model.layers[i].mlp.{gate,up,down}_proj (LLaMA/Qwen2-style "
+            f"decoder layers); got model_type={model.config.model_type!r}"
+        )
 
     for idx, layer in enumerate(model.model.layers):
         if hasattr(layer, 'self_attn'):
@@ -84,6 +99,14 @@ def inject_mixlora_into_llama(model, config, weights: Optional[Dict] = None):
             _inject_llama_mlp_module(idx, layer.mlp, config, weights)
 
     return model
+
+
+# Alias: the injection logic is name-based (model.model.layers[i].self_attn /
+# .mlp.{q,k,v,o,gate,up,down}_proj) and works for any LLaMA-family or
+# Qwen2-family decoder (verified: Qwen2Attention/Qwen2MLP use identical
+# attribute names; q/k/v biases are preserved since LoraLinear wraps and
+# calls the original nn.Linear internally).
+inject_mixlora_into_model = inject_mixlora_into_llama
 
 
 def initialize_mixlora_weights_for_llama(model: PreTrainedModel, config: MixLoraConfig) -> Dict[str, torch.Tensor]:

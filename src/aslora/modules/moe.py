@@ -31,7 +31,12 @@ class MixLoraSparseMoe(nn.Module):
 
         self.branch_mode = getattr(config, 'branch_mode', 'sparse_only')
         target_sparsity = getattr(config, 'target_sparsity', 0.3)
-        self.sparsify_module = SparsifyModule(target_sparsity)
+        self.sparsify_module = SparsifyModule(
+            target_sparsity,
+            mask_type=getattr(config, 'mask_type', 'magnitude'),
+            block_aligned=getattr(config, 'block_aligned', False),
+            block_size=getattr(config, 'block_size', 32),
+        )
 
         if self.branch_mode == 'dual_scalar_gate':
             self.scalar_gate = InputDependentScalarGate(self.hidden_size)
@@ -39,6 +44,11 @@ class MixLoraSparseMoe(nn.Module):
         self.register_buffer("last_bal_loss", torch.tensor(0.0))
         self.last_hidden: torch.Tensor | None = None
         self.last_routing: torch.Tensor | None = None
+
+        # Expert-swap probe: when set, overrides the default (router_idx+1)%N
+        # routed-slot -> expert map with an explicit permutation tensor
+        # (index = router_idx, value = expert index). None = default mapping.
+        self.expert_swap_perm: torch.Tensor | None = None
 
     def _apply_lora_with_branch(self, lora_module, base_out: torch.Tensor, x_dense: torch.Tensor, x_sparse: torch.Tensor) -> torch.Tensor:
         # LoRA input: dense for 'dense_only' mode, sparse otherwise. The dual_scalar_gate
@@ -100,7 +110,10 @@ class MixLoraSparseMoe(nn.Module):
             curr_g_base = g_base_full[token_indices]
             curr_u_base = u_base_full[token_indices]
 
-            target_expert_idx = (router_idx + 1) % len(self.experts_)
+            if self.expert_swap_perm is not None:
+                target_expert_idx = int(self.expert_swap_perm[router_idx])
+            else:
+                target_expert_idx = (router_idx + 1) % len(self.experts_)
 
             out_expert = self._apply_expert(
                 curr_x_dense, curr_x_sparse, self.experts_[target_expert_idx], curr_g_base, curr_u_base

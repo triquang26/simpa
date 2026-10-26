@@ -2,9 +2,20 @@
 
 target_sparsity=0.7  → keep top 30% of activations by magnitude.
 
-Run from repo root:
+Run from repo root (default flags reproduce the original hardcoded behavior
+exactly — magnitude mask, coordinate-wise, target_sparsity=0.7, seed=42,
+pushes to twanghcmut/Meta-Llama-3-8B-simpa-dual_scalar_gate-arc):
     uv run python scripts/train_llama3_arc_easy.py
+
+Paper-spec block-aligned magnitude mask (p=0.7, block size 32):
+    uv run python scripts/train_llama3_arc_easy.py \\
+        --block-aligned --repo-suffix block-p07
+
+Random-mask control at the same density:
+    uv run python scripts/train_llama3_arc_easy.py \\
+        --mask-type random --block-aligned --repo-suffix randmask-block-p07
 """
+import argparse
 import os
 import sys
 import time
@@ -31,13 +42,54 @@ torch.set_float32_matmul_precision("high")
 
 MODEL_ID    = "meta-llama/Meta-Llama-3-8B"
 HF_USERNAME = "twanghcmut"
-HF_REPO_NAME = "Meta-Llama-3-8B-simpa-dual_scalar_gate-arc"
+HF_REPO_NAME_BASE = "Meta-Llama-3-8B-simpa-dual_scalar_gate-arc"
+
+# Defaults preserve the exact original hardcoded behavior when no CLI args are passed.
+DEFAULT_MASK_TYPE = "magnitude"
+DEFAULT_BLOCK_ALIGNED = False
+DEFAULT_TARGET_SPARSITY = 0.7
+DEFAULT_SEED = 42
+DEFAULT_BLOCK_SIZE = 32
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--mask-type", choices=["magnitude", "random", "none"], default=DEFAULT_MASK_TYPE,
+                   help=f"Sparsify mask type (default: {DEFAULT_MASK_TYPE}, matches original hardcoded behavior).")
+    p.add_argument("--block-aligned", action="store_true", default=DEFAULT_BLOCK_ALIGNED,
+                   help="Use block-aligned masking instead of coordinate-wise (default: coordinate-wise).")
+    p.add_argument("--block-size", type=int, default=DEFAULT_BLOCK_SIZE,
+                   help=f"Block size when --block-aligned is set (default: {DEFAULT_BLOCK_SIZE}).")
+    p.add_argument("--target-sparsity", type=float, default=DEFAULT_TARGET_SPARSITY,
+                   help=f"Target sparsity p (default: {DEFAULT_TARGET_SPARSITY}, matches original hardcoded value).")
+    p.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                   help=f"Training seed (default: {DEFAULT_SEED}).")
+    p.add_argument("--repo-suffix", type=str, default="",
+                   help="Appended to the HF hub repo name (e.g. '-randmask-block-p07') so reruns with "
+                        "different mask configs don't clobber the reference checkpoint. REQUIRED "
+                        "(non-empty) whenever --mask-type != "
+                        f"'{DEFAULT_MASK_TYPE}' or --block-aligned is set.")
+    args = p.parse_args()
+
+    non_default_mask = args.mask_type != DEFAULT_MASK_TYPE or args.block_aligned != DEFAULT_BLOCK_ALIGNED
+    if non_default_mask and not args.repo_suffix:
+        p.error(
+            "--repo-suffix is required (non-empty) whenever --mask-type != "
+            f"'{DEFAULT_MASK_TYPE}' or --block-aligned is set, to avoid accidentally "
+            "overwriting the reference checkpoint "
+            f"(twanghcmut/{HF_REPO_NAME_BASE})."
+        )
+    return args
 
 
 def main():
+    args = parse_args()
+
     secrets = load_secrets()
     preflight_check(secrets)
     login_hf_and_wandb(secrets)
+
+    hf_repo_name = HF_REPO_NAME_BASE + (f"-{args.repo_suffix}" if args.repo_suffix else "")
 
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID, dtype=torch.bfloat16, device_map="auto",
@@ -49,10 +101,13 @@ def main():
 
     mixlora_config = create_mixlora_config_for_llama(
         base_model=MODEL_ID,
-        target_sparsity=0.7,
+        target_sparsity=args.target_sparsity,
         branch_mode="dual_scalar_gate",
         gate_rank=16, r=16, lora_alpha=32, lora_dropout=0.05,
         num_experts=8, top_k=2, router_aux_loss_coef=0.001,
+        mask_type=args.mask_type,
+        block_aligned=args.block_aligned,
+        block_size=args.block_size,
     )
     mixlora_weights = initialize_mixlora_weights_for_llama(model, mixlora_config)
     model = inject_mixlora_into_llama(model, mixlora_config, mixlora_weights)
@@ -67,7 +122,7 @@ def main():
     train_dataset = create_arc_easy_dataset(tokenizer, max_length=512, split="train")
 
     training_args = TrainingArguments(
-        output_dir=f"./{HF_REPO_NAME}_output",
+        output_dir=f"./{hf_repo_name}_output",
         per_device_train_batch_size=2,
         gradient_accumulation_steps=4,
         num_train_epochs=10,
@@ -83,8 +138,10 @@ def main():
         logging_steps=5,
         save_strategy="no",
         report_to="wandb",
-        run_name=HF_REPO_NAME,
+        run_name=hf_repo_name,
         remove_unused_columns=False,
+        seed=args.seed,
+        data_seed=args.seed,
     )
 
     trainer = MixLoraTrainer(
@@ -103,7 +160,7 @@ def main():
     print(f"\n{'='*50}\nTổng thời gian: {total_duration/60:.2f} phút  |  "
           f"Avg/step: {total_duration/total_steps:.2f}s  |  Steps: {total_steps}\n{'='*50}\n")
 
-    HF_REPO_ARC = f"{HF_USERNAME}/{HF_REPO_NAME}"
+    HF_REPO_ARC = f"{HF_USERNAME}/{hf_repo_name}"
     with tempfile.TemporaryDirectory() as tmpdir:
         adapter_dir = os.path.join(tmpdir, "adapter")
         save_mixlora_adapter_safetensors(model, mixlora_config, adapter_dir)

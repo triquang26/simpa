@@ -1,8 +1,22 @@
 """Standalone SIMPA sparse MoE Triton benchmark.
 
+SIMPA feeds each routed expert a magnitude-sparsified input. With the
+block-aligned mask, the hidden dimension d is split into d / B contiguous
+blocks of B coordinates; each token keeps the k_blocks = round((1 - p) * d / B)
+blocks with the largest squared L2 norm and drops the rest. The expert
+projection then only needs the weight rows of the kept coordinates:
+
+    y[t, :] = sum_{j in kept(t)} x[t, j] * W[j, :]
+
+`simpa_sparse_indexed_gemm_kernel` computes exactly this sum from the
+(values, indices) pair produced by `BlockColumnSparsifyModule`, so the dropped
+p fraction of W is never read from HBM. Because kept indices come in runs of
+B consecutive rows, every gathered block of W is one contiguous slab of memory.
+
 Run on a CUDA machine with a PyTorch CUDA build and Triton installed:
 
     uv run python benchmarks/triton_sparse_moe_benchmark.py
+    uv run python benchmarks/triton_sparse_moe_benchmark.py --block-size 1   # coordinate-wise mask
 """
 
 from __future__ import annotations
@@ -47,6 +61,9 @@ if triton is not None:
         block_k: tl.constexpr,
         block_out: tl.constexpr,
     ):
+        # One program = one token x one tile of `block_out` output columns.
+        # It reads the token's k_keep kept (value, index) pairs, gathers the
+        # matching rows W[index, tile] and reduces over k_keep in fp32.
         token_id = tl.program_id(0)
         out_block = tl.program_id(1)
 
@@ -157,17 +174,40 @@ def simpa_linear(
 
 
 class BlockColumnSparsifyModule(nn.Module):
-    """Keep the largest activations by absolute value for each token."""
+    """Block-aligned magnitude mask, returned in (values, indices) form.
 
-    def __init__(self, target_sparsity: float = 0.7):
+    The hidden dim is split into contiguous blocks of `block_size` coordinates.
+    Each token keeps the top round((1 - p) * n_blocks) blocks ranked by squared
+    L2 norm (same rule as `aslora.modules.sparsify.SparsifyModule` with
+    block_aligned=True). Kept blocks are sorted by position so the kernel walks
+    W in increasing address order. `block_size=1` gives the coordinate-wise
+    top-k magnitude mask.
+    """
+
+    def __init__(self, target_sparsity: float = 0.7, block_size: int = 32):
         super().__init__()
         if not 0.0 <= target_sparsity < 1.0:
             raise ValueError("target_sparsity must be in [0, 1).")
+        if block_size < 1:
+            raise ValueError("block_size must be >= 1.")
         self.target_sparsity = target_sparsity
+        self.block_size = block_size
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        k_keep = max(1, int(x.shape[-1] * (1.0 - self.target_sparsity)))
-        _, indices = torch.topk(x.abs(), k_keep, dim=-1, sorted=False)
+        if self.block_size == 1:
+            k_keep = max(1, int(x.shape[-1] * (1.0 - self.target_sparsity)))
+            _, indices = torch.topk(x.abs(), k_keep, dim=-1, sorted=False)
+        else:
+            d = x.shape[-1]
+            if d % self.block_size != 0:
+                raise ValueError(f"hidden dim ({d}) must be divisible by block_size ({self.block_size}).")
+            n_blocks = d // self.block_size
+            k_blocks = max(1, round((1.0 - self.target_sparsity) * n_blocks))
+            block_scores = x.float().reshape(x.shape[0], n_blocks, self.block_size).pow(2).sum(-1)
+            _, kept_blocks = torch.topk(block_scores, k_blocks, dim=-1, sorted=False)
+            kept_blocks, _ = kept_blocks.sort(dim=-1)
+            offsets = torch.arange(self.block_size, device=x.device)
+            indices = (kept_blocks.unsqueeze(-1) * self.block_size + offsets).reshape(x.shape[0], -1)
         values = torch.gather(x, dim=-1, index=indices)
         return values.contiguous(), indices.to(torch.int64).contiguous()
 
@@ -208,12 +248,13 @@ class SIMPASparseMoe(nn.Module):
         out_features: int,
         target_sparsity: float,
         dtype: torch.dtype,
+        block_size: int = 32,
     ):
         super().__init__()
         weights = torch.empty(num_experts, in_features, out_features, dtype=dtype)
         nn.init.normal_(weights, mean=0.0, std=1.0 / math.sqrt(in_features))
         self.weights = nn.Parameter(weights)
-        self.sparsify = BlockColumnSparsifyModule(target_sparsity=target_sparsity)
+        self.sparsify = BlockColumnSparsifyModule(target_sparsity=target_sparsity, block_size=block_size)
 
     def forward(
         self,
@@ -245,6 +286,7 @@ class BenchmarkConfig:
     num_experts: int = 8
     top_k: int = 2
     target_sparsity: float = 0.7
+    block_size: int = 32
     warmup: int = 10
     iters: int = 50
     dtype: str = "float16"
@@ -296,6 +338,8 @@ def run_benchmark() -> None:
     parser.add_argument("--num-experts", type=int, default=BenchmarkConfig.num_experts)
     parser.add_argument("--top-k", type=int, default=BenchmarkConfig.top_k)
     parser.add_argument("--target-sparsity", type=float, default=BenchmarkConfig.target_sparsity)
+    parser.add_argument("--block-size", type=int, default=BenchmarkConfig.block_size,
+                        help="Mask block size; 1 = coordinate-wise top-k.")
     parser.add_argument("--warmup", type=int, default=BenchmarkConfig.warmup)
     parser.add_argument("--iters", type=int, default=BenchmarkConfig.iters)
     parser.add_argument("--dtype", choices=["float16", "bfloat16", "float32"], default=BenchmarkConfig.dtype)
@@ -329,6 +373,7 @@ def run_benchmark() -> None:
         out_features=args.out_features,
         target_sparsity=args.target_sparsity,
         dtype=dtype,
+        block_size=args.block_size,
     ).to(device)
     sparse.weights.data.copy_(dense.weights.data)
 
@@ -336,7 +381,8 @@ def run_benchmark() -> None:
     print(
         "Shape: "
         f"tokens={args.tokens}, in={args.in_features}, out={args.out_features}, "
-        f"experts={args.num_experts}, top_k={args.top_k}, sparsity={args.target_sparsity}"
+        f"experts={args.num_experts}, top_k={args.top_k}, sparsity={args.target_sparsity}, "
+        f"block_size={args.block_size}"
     )
     print(f"dtype={args.dtype}, warmup={args.warmup}, iters={args.iters}")
 

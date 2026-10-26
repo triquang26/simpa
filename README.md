@@ -73,7 +73,20 @@ $EDITOR .env
 uv run aslora train --config configs/sparse_only.yaml
 uv run aslora train --config configs/dense_only.yaml
 uv run aslora train --config configs/dual_scalar_gate.yaml
+
+# block-aligned magnitude mask (paper setting: block size 32)
+uv run aslora train --config configs/dual_scalar_gate.yaml \
+  --override sparsity.block_aligned=true sparsity.block_size=32
 ```
+
+Sparsity options (`sparsity:` section of the config, saved into `adapter_config.json`):
+
+| key | default | meaning |
+|---|---|---|
+| `target_sparsity` | `0.3` | fraction `p` of the input dropped before the routed LoRA branch |
+| `block_aligned` | `false` | rank and keep contiguous blocks instead of single coordinates |
+| `block_size` | `32` | block width `B` when `block_aligned` is on |
+| `mask_type` | `magnitude` | `magnitude`, `random` (control at the same density), or `none` |
 
 ## Evaluation
 
@@ -94,19 +107,86 @@ from the adapter's `adapter_config.json`.
 - `src/aslora/` — package source (config, modules, data, training, eval, CLI).
 - `third_party/mixlora/` — vendored copy of [TUDB-Labs/MixLoRA](https://github.com/TUDB-Labs/MixLoRA),
   installed as an editable path dep.
-- `scripts/` — convenience launchers wrapping the three `uv run aslora train ...` commands.
+- `scripts/` — training launchers and measurement scripts (Jaccard, Hill estimator).
+- `benchmarks/` — standalone Triton kernel benchmark.
+- `tests/` — CPU-only unit tests.
 
-## Triton Sparse MoE Benchmark
+## Block-Aligned Mask and Triton Kernel
 
-The standalone Triton benchmark lives at `benchmarks/triton_sparse_moe_benchmark.py`.
-It does not import the training package, so it can be inspected or run independently on a GPU
-machine.
+### 1. The mask
 
-```bash
-uv run python benchmarks/triton_sparse_moe_benchmark.py
+For a token's hidden state $x \in \mathbb{R}^d$, split the $d$ coordinates into $n = d/B$
+contiguous blocks of width $B$ (default $B = 32$). Score each block by its energy and keep the
+top $k_b = \mathrm{round}\big((1-p)\,n\big)$ blocks:
+
+$$
+s_b = \lVert x_{[bB:(b+1)B]} \rVert_2^2, \qquad
+\mathcal{K}(x) = \mathrm{TopK}_{k_b}(s_1, \dots, s_n), \qquad
+\tilde{x}_j = x_j \cdot \mathbb{1}\big[\lfloor j/B \rfloor \in \mathcal{K}(x)\big].
+$$
+
+The sparse routed-LoRA branch sees $\tilde{x}$; the parallel dense LoRA branch still sees $x$.
+Since $\mathcal{K}(x)$ depends on the token, different tokens (and therefore the experts they
+are routed to) see different slices of the input.
+
+```
+x (d = 4096)   [b0][b1][b2][b3][b4][b5] ... [b127]     128 blocks of 32 coordinates
+block energy    .2  3.1  .1  2.4  .3  1.9 ...   .1
+p = 0.7         --  [b1] --  [b3] --  [b5] ...  --     keep top round(0.3*128) = 38 blocks
 ```
 
-Requirements: CUDA GPU, a PyTorch CUDA build, and Triton.
+Training-side implementation: `SparsifyModule._block_mask` in
+[`src/aslora/modules/sparsify.py`](src/aslora/modules/sparsify.py).
+
+### 2. Why it is cheap: only kept rows of W are read
+
+For a projection $W \in \mathbb{R}^{d \times h}$, zeroed coordinates contribute nothing, so
+
+$$
+y = \tilde{x}\,W = \sum_{j \in \mathrm{kept}(x)} x_j\, W_{j,:} .
+$$
+
+Instead of a dense matmul over all $d$ rows, the kernel gathers only the $(1-p)\,d$ kept rows.
+With the block-aligned mask those rows come in runs of $B$ consecutive rows, so every kept block
+is one contiguous slab of $W$ in memory rather than scattered single rows.
+
+```
+W (d x h, row-major)
+row   0..31   [..............]  dropped  -> never loaded
+row  32..63   [##############]  kept     -> one contiguous read
+row  64..95   [..............]  dropped
+row  96..127  [##############]  kept     -> one contiguous read
+...
+```
+
+### 3. The kernel
+
+[`benchmarks/triton_sparse_moe_benchmark.py`](benchmarks/triton_sparse_moe_benchmark.py)
+
+| piece | role |
+|---|---|
+| `BlockColumnSparsifyModule` | builds the block-aligned mask in `(values, indices)` form: `values[t] = x[t, kept]`, `indices[t]` = kept coordinates, blocks sorted by position |
+| `simpa_sparse_indexed_gemm_kernel` | grid = `(tokens, ceil(h / block_out))`; each program loads one token's `k_keep` (value, index) pairs, gathers `W[indices, tile]`, and reduces in fp32 to produce `y[t, tile]` |
+| `simpa_linear` | launch wrapper (`block_out = 32`, `num_warps = 4`) |
+| `SIMPASparseMoe` | routes tokens to experts and calls `simpa_linear` per expert, vs. `DenseMoeBaseline` (dense PyTorch matmul) |
+
+At $p = 0.7$ the kernel executes 30% of the dense FLOPs and gives a **1.46× end-to-end
+inference speedup**. The gain is below the FLOP ratio ($1/0.3 \approx 3.3\times$) because the
+indexed gather is memory-bound: dropping rows cuts arithmetic faster than it cuts memory traffic.
+
+```bash
+uv run python benchmarks/triton_sparse_moe_benchmark.py                 # block-aligned, B = 32
+uv run python benchmarks/triton_sparse_moe_benchmark.py --block-size 1  # coordinate-wise mask
+```
+
+Requirements: CUDA GPU, a PyTorch CUDA build, and Triton. The benchmark does not import the
+training package. CPU-only tests check that the kernel-side mask matches the training-side mask
+and that the indexed product equals $\tilde{x}W$:
+
+```bash
+uv run python tests/test_kernel_mask.py
+uv run python tests/test_sparsify_masks.py
+```
 
 ## Citation
 

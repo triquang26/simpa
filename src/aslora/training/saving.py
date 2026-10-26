@@ -25,6 +25,9 @@ def save_mixlora_adapter_safetensors(model: nn.Module, config: Any, save_directo
         'models_path': getattr(config, 'models_path', ''),
         'branch_mode': getattr(config, 'branch_mode', 'sparse_only'),
         'gate_rank': getattr(config, 'gate_rank', 16),
+        'mask_type': getattr(config, 'mask_type', 'magnitude'),
+        'block_aligned': bool(getattr(config, 'block_aligned', False)),
+        'block_size': int(getattr(config, 'block_size', 32)),
     })
     with open(os.path.join(save_directory, "adapter_config.json"), "w", encoding="utf-8") as f:
         json.dump(config_dict, f, indent=2)

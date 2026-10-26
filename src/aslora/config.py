@@ -22,6 +22,9 @@ def create_mixlora_config_for_llama(
     models_path: str = "/root/simpa/models/Llama-2-7B",
     gate_rank: int = 16,
     branch_mode: str = "sparse_only",
+    mask_type: str = "magnitude",
+    block_aligned: bool = False,
+    block_size: int = 32,
 ):
     if target_modules is None:
         target_modules = {
@@ -58,6 +61,9 @@ def create_mixlora_config_for_llama(
     config.target_sparsity = target_sparsity
     config.models_path = models_path
     config.gate_rank = gate_rank
+    config.mask_type = mask_type
+    config.block_aligned = block_aligned
+    config.block_size = block_size
     config.adapter_name_ = "default"
     config.dtype_ = torch.float32
     config.act_fn_ = "silu"
@@ -95,6 +101,9 @@ class MoeCfg:
 @dataclass
 class SparsityCfg:
     target_sparsity: float = 0.3
+    mask_type: str = "magnitude"  # magnitude | random | none
+    block_aligned: bool = False
+    block_size: int = 32
 
 
 @dataclass
@@ -121,6 +130,7 @@ class TrainCfg:
     gradient_checkpointing: bool = True
     dataloader_num_workers: int = 8
     max_steps: int = -1
+    seed: int = 42
 
 
 @dataclass

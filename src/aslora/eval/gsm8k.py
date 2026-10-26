@@ -17,6 +17,9 @@ class GSM8KEvalCallback(TrainerCallback):
         self.dataset = load_dataset("gsm8k", "main", split="test")
 
     def evaluate(self, model):
+        # Decoder-only generation requires left-padding (see run_offline_eval).
+        self.tokenizer.padding_side = "left"
+
         def preprocess(examples):
             examples["x"] = []
             examples["y"] = []
@@ -86,6 +89,11 @@ class GSM8KEvalCallback(TrainerCallback):
 def run_offline_eval(model, tokenizer, batch_size: int = 4, max_new_tokens: int = 512) -> float:
     """Standalone GSM8K test-set accuracy using greedy generation."""
     device = next(model.parameters()).device
+    # Decoder-only generation REQUIRES left-padding: with right-padding the pad
+    # tokens sit between the prompt and the generated tokens and corrupt the
+    # continuation for every non-longest sequence in a batch (systematically
+    # lowers accuracy). Must be set before tokenizing the eval batches.
+    tokenizer.padding_side = "left"
     dataset = load_dataset("gsm8k", "main", split="test")
 
     def collate_fn(batch):

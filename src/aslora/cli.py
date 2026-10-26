@@ -88,6 +88,12 @@ def _load_adapter_overrides(cfg: ExperimentConfig, adapter_path: str) -> None:
             cfg.sparsity.target_sparsity = float(adapter_cfg["target_sparsity"])
         if "gate_rank" in adapter_cfg:
             cfg.moe.gate_rank = int(adapter_cfg["gate_rank"])
+        if "mask_type" in adapter_cfg:
+            cfg.sparsity.mask_type = str(adapter_cfg["mask_type"])
+        if "block_aligned" in adapter_cfg:
+            cfg.sparsity.block_aligned = bool(adapter_cfg["block_aligned"])
+        if "block_size" in adapter_cfg:
+            cfg.sparsity.block_size = int(adapter_cfg["block_size"])
 
 
 def _build_mixlora_config(cfg: ExperimentConfig):
@@ -102,6 +108,9 @@ def _build_mixlora_config(cfg: ExperimentConfig):
         num_experts=cfg.moe.num_experts,
         top_k=cfg.moe.top_k,
         router_aux_loss_coef=cfg.moe.router_aux_loss_coef,
+        mask_type=cfg.sparsity.mask_type,
+        block_aligned=cfg.sparsity.block_aligned,
+        block_size=cfg.sparsity.block_size,
     )
 
 
@@ -128,6 +137,8 @@ def _build_training_args(cfg: ExperimentConfig, run_name: str, output_dir: str) 
         run_name=run_name,
         remove_unused_columns=False,
         save_strategy="no",
+        seed=t.seed,
+        data_seed=t.seed,
     )
     if getattr(t, "max_steps", None):
         kwargs["max_steps"] = t.max_steps
@@ -159,7 +170,7 @@ def _load_model_with_adapter(cfg: ExperimentConfig, adapter_path: str):
 def cmd_train(args: argparse.Namespace) -> None:
     cfg: ExperimentConfig = load_experiment_config(args.config, overrides=args.override or [])
 
-    _set_seed(42)
+    _set_seed(cfg.train.seed)
 
     secrets = load_secrets()
     preflight_check(secrets)
