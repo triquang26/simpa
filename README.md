@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/acl-logo.svg" alt="ACL" height="64"/>
+<img src="assets/emnlp2026.png" alt="EMNLP 2026" width="640"/>
 
 # SIMPA: Restricting What Experts See, Not What They Produce, in MoE-PEFT
 
@@ -19,8 +19,8 @@
 <sup>2</sup>Applied Artificial Intelligence Initiative (A2I2), Deakin University, Australia
 
 <p>
-<a href="https://2026.emnlp.org/"><img src="https://img.shields.io/badge/EMNLP-2026-1f6feb?style=for-the-badge" alt="EMNLP 2026"></a>
-<a href="https://arxiv.org/abs/XXXX.XXXXX"><img src="https://img.shields.io/badge/arXiv-XXXX.XXXXX-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white" alt="arXiv"></a>
+<a href="https://2026.emnlp.org/"><img src="https://img.shields.io/badge/EMNLP_2026-Main_Conference-ed1c24?style=for-the-badge" alt="EMNLP 2026 Main"></a>
+<a href="https://aclanthology.org/2026.emnlp-main.726.pdf"><img src="https://img.shields.io/badge/Paper-ACL_Anthology-1f6feb?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Paper"></a>
 <a href="https://huggingface.co/twanghcmut"><img src="https://img.shields.io/badge/%F0%9F%A4%97-Checkpoints-ffd21e?style=for-the-badge" alt="Hugging Face"></a>
 <img src="https://img.shields.io/badge/Python-3.12-3776ab?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12">
 </p>
@@ -29,8 +29,8 @@
 
 ## 🔥 News
 
-- **[2026/10]** 🎉 SIMPA is accepted to **EMNLP 2026**!
-- **[2026/10]** Code released. Paper coming soon on [arXiv](https://arxiv.org/abs/XXXX.XXXXX).
+- **[2026/10]** 🎉 SIMPA is accepted to the **EMNLP 2026 Main Conference**!
+- **[2026/10]** Code released. Paper available on [ACL Anthology](https://aclanthology.org/2026.emnlp-main.726.pdf).
 
 ## Overview
 
@@ -109,12 +109,12 @@ Requirements: CUDA GPU, a PyTorch CUDA build, and Triton.
 If you find SIMPA useful, please cite:
 
 ```bibtex
-@inproceedings{quang2026simpa,
+@inproceedings{quang-etal-2026-simpa,
   title     = {{SIMPA}: Restricting What Experts See, Not What They Produce, in {MoE-PEFT}},
   author    = {Pham, Tri Quang and Tran, Khoa and Do, Giang and Le, Hung and Tran, Truyen and Quan, Tho T.},
   booktitle = {Proceedings of the 2026 Conference on Empirical Methods in Natural Language Processing (EMNLP)},
   year      = {2026},
-  url       = {https://arxiv.org/abs/XXXX.XXXXX}
+  url       = {https://aclanthology.org/2026.emnlp-main.726/}
 }
 ```
 
