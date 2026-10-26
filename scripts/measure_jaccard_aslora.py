@@ -1,4 +1,4 @@
-"""Measure Jaccard E1 on the user's SIMPA checkpoint (column-wise output_gate).
+"""Measure Jaccard E1 on a trained SIMPA checkpoint (column-wise output_gate).
 
 Reconstructs the exact architecture used to train the checkpoint at
 twanghcmut/Llama-2-7b-hf-gsm8k, then loads weights and runs the per-expert
@@ -45,7 +45,7 @@ LORA_DROPOUT = 0.05
 P_SPARSIFY = 0.7  # SIMPA standard: drop 70%, keep top 30%
 
 
-# === Architecture reconstruction (matches the user's original SIMPA) ===
+# === Architecture reconstruction (matches the original SIMPA) ===
 
 
 class SparsifyModule(nn.Module):
@@ -166,7 +166,7 @@ class MixLoraSparseMoe(nn.Module):
 
 
 def inject_full_simpa(model):
-    """Inject the user's exact SIMPA architecture (attn LoRA + mlp.mixlora_moes.default)."""
+    """Inject the exact SIMPA architecture (attn LoRA + mlp.mixlora_moes.default)."""
     lora_cfg = _make_lora_config()
     for layer in model.model.layers:
         # Attention LoRA (q/k/v/o)
