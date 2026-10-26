@@ -1,6 +1,10 @@
 <div align="center">
 
-<img src="assets/emnlp2026.png" alt="EMNLP 2026" width="640"/>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/emnlp2026-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/emnlp2026.png">
+  <img src="assets/emnlp2026.png" alt="EMNLP 2026" width="640">
+</picture>
 
 # SIMPA: Restricting What Experts See, Not What They Produce, in MoE-PEFT
 
